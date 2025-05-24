@@ -43,6 +43,7 @@ import {
   duplicateTaskTool,
   getCurrentTimeEntryTool,
   getTaskCommentsTool,
+  getTasksTool,
   getTaskTimeEntriesTool,
   getTaskTool,
   getWorkspaceTasksTool,
@@ -58,6 +59,7 @@ import {
   handleGetCurrentTimeEntry,
   handleGetTask,
   handleGetTaskComments,
+  handleGetTasks,
   handleGetTaskTimeEntries,
   handleGetWorkspaceTasks,
   handleMoveBulkTasks,
@@ -154,6 +156,43 @@ server.tool(
 );
 
 server.tool(
+  getTasksTool.name,
+  getTasksTool.description,
+  {
+    listId: z
+      .string()
+      .optional()
+      .describe(
+        'ID of list to get tasks from (preferred). Use this instead of listName if you have it.'
+      ),
+    listName: z
+      .string()
+      .optional()
+      .describe(
+        "Name of list to get tasks from. Only use if you don't have listId."
+      ),
+    subtasks: z.boolean().optional().describe('Include subtasks'),
+    statuses: z
+      .array(z.string())
+      .optional()
+      .describe("Filter by status names (e.g. ['To Do', 'In Progress'])"),
+    archived: z.boolean().optional().describe('Include archived tasks'),
+    page: z
+      .number()
+      .optional()
+      .describe('Page number for pagination (starts at 0)'),
+    order_by: z
+      .string()
+      .optional()
+      .describe('Sort field: due_date, created, updated'),
+    reverse: z.boolean().optional().describe('Reverse sort order (descending)'),
+  },
+  async (params) => {
+    return (await handleGetTasks(params)) as Tool;
+  }
+);
+
+server.tool(
   createTaskTool.name,
   createTaskTool.description,
   {
@@ -172,7 +211,7 @@ server.tool(
       .string()
       .optional()
       .describe(
-        'REQUIRED (unless listName provided): Name of the list to create the task in - will automatically find the list by name.'
+        'REQUIRED (unless listId provided): Name of the list to create the task in - will automatically find the list by name.'
       ),
     description: z
       .string()
@@ -358,12 +397,14 @@ server.tool(
       .string()
       .optional()
       .describe(
-        'ID of destination list (preferred). Use this instead of listName if you have it.'
+        'ID of the destination list (preferred). Use this if you have the list ID from a previous response.'
       ),
     listName: z
       .string()
       .optional()
-      .describe("Name of destination list. Only use if you don't have listId."),
+      .describe(
+        'Name of the destination list. Will be used to look up the list if listId is not provided.'
+      ),
   },
   async (params) => {
     return (await handleMoveTask(params)) as Tool;
@@ -538,44 +579,93 @@ server.tool(
   createBulkTasksTool.name,
   createBulkTasksTool.description,
   {
-    listId: z.string().describe('ID of the list to create the tasks in.'),
     tasks: z
       .array(
         z.object({
-          name: z.string().describe('Name of the task.'),
-          description: z
+          name: z.string().describe('Task name with emoji prefix'),
+          description: z.string().optional().describe('Plain text description'),
+          markdown_description: z
             .string()
             .optional()
-            .describe('Description of the task.'),
-          assignees: z
-            .array(z.string())
+            .describe('Markdown description (overrides plain text)'),
+          status: z
+            .string()
             .optional()
-            .describe('Array of user IDs to assign to the task.'),
-          tags: z
-            .array(z.string())
+            .describe('Task status (uses list default if omitted)'),
+          priority: z
+            .number()
             .optional()
-            .describe('Array of tag names to add to the task.'),
-          status: z.string().optional().describe('Status to set for the task.'),
-          priority: z.number().optional().describe('Priority of the task.'),
+            .describe('Priority 1-4 (1=urgent, 4=low)'),
           dueDate: z
             .string()
             .optional()
-            .describe('Due date of the task (YYYY-MM-DD).'),
-          startDate: z
-            .string()
+            .describe(
+              "Due date. Supports Unix timestamps (in milliseconds) and natural language expressions like '1 hour from now', 'tomorrow', 'next week', etc."
+            ),
+          tags: z
+            .array(z.string())
             .optional()
-            .describe('Start date of the task (YYYY-MM-DD).'),
-          customFields: z
-            .array(z.object({ id: z.string(), value: z.any() }))
+            .describe(
+              'Optional array of tag names to assign to the task. The tags must already exist in the space.'
+            ),
+          custom_fields: z
+            .array(
+              z.object({
+                id: z.string().describe('ID of the custom field'),
+                value: z
+                  .any()
+                  .describe(
+                    'Value for the custom field. Type depends on the field type.'
+                  ),
+              })
+            )
             .optional()
-            .describe('Array of custom fields to set for the task.'),
-          parentTask: z
-            .string()
-            .optional()
-            .describe('ID of the parent task, if creating a subtask.'),
+            .describe(
+              'Optional array of custom field values to set on the task.'
+            ),
         })
       )
-      .describe('Array of task objects to create.'),
+      .describe(
+        'Array of tasks to create. Each task must have at least a name.'
+      ),
+    listId: z
+      .string()
+      .optional()
+      .describe(
+        'ID of list for new tasks (preferred). Use this instead of listName if you have it.'
+      ),
+    listName: z
+      .string()
+      .optional()
+      .describe(
+        "Name of list for new tasks. Only use if you don't have listId."
+      ),
+    options: z
+      .union([
+        z
+          .object({
+            batchSize: z
+              .number()
+              .optional()
+              .describe('Tasks per batch (default: 10)'),
+            concurrency: z
+              .number()
+              .optional()
+              .describe('Parallel operations (default: 3)'),
+            continueOnError: z
+              .boolean()
+              .optional()
+              .describe('Continue if some tasks fail'),
+            retryCount: z
+              .number()
+              .optional()
+              .describe('Retry attempts for failures'),
+          })
+          .optional(),
+        z.string().optional(),
+      ])
+      .optional()
+      .describe('Processing options (or JSON string representing options)'),
   },
   async (params) => {
     return (await handleCreateBulkTasks(params)) as Tool;
@@ -589,44 +679,90 @@ server.tool(
     tasks: z
       .array(
         z.object({
-          id: z.string().describe('ID of the task to update.'),
-          name: z.string().optional().describe('New name for the task.'),
+          taskId: z
+            .string()
+            .optional()
+            .describe(
+              "Task ID (preferred). Works with both regular task IDs (9 characters) and custom IDs with uppercase prefixes (like 'DEV-1234')."
+            ),
+          taskName: z
+            .string()
+            .optional()
+            .describe('Task name. Requires listName when used.'),
+          listName: z
+            .string()
+            .optional()
+            .describe('REQUIRED with taskName: List containing the task.'),
+          customTaskId: z
+            .string()
+            .optional()
+            .describe(
+              "Custom task ID (e.g., 'DEV-1234'). Only use if you want to explicitly force custom ID lookup. In most cases, use taskId which auto-detects ID format."
+            ),
+          name: z.string().optional().describe('New name with emoji prefix'),
           description: z
             .string()
             .optional()
-            .describe('New description for the task.'),
-          assignees: z
-            .array(z.string())
-            .optional()
-            .describe('New array of user IDs to assign to the task.'),
-          tags: z
-            .array(z.string())
-            .optional()
-            .describe('New array of tag names to add to the task.'),
-          status: z
+            .describe('New plain text description'),
+          markdown_description: z
             .string()
             .optional()
-            .describe('New status to set for the task.'),
-          priority: z.number().optional().describe('New priority of the task.'),
+            .describe('New markdown description'),
+          status: z.string().optional().describe('New status'),
+          priority: z
+            .number()
+            .optional()
+            .describe('New priority (1-4 or null)'),
           dueDate: z
             .string()
             .optional()
-            .describe('New due date of the task (YYYY-MM-DD).'),
-          startDate: z
-            .string()
+            .describe(
+              "New due date. Supports Unix timestamps (in milliseconds) and natural language expressions like '1 hour from now', 'tomorrow', etc."
+            ),
+          custom_fields: z
+            .array(
+              z.object({
+                id: z.string().describe('ID of the custom field'),
+                value: z
+                  .any()
+                  .describe(
+                    'Value for the custom field. Type depends on the field type.'
+                  ),
+              })
+            )
             .optional()
-            .describe('New start date of the task (YYYY-MM-DD).'),
-          customFields: z
-            .array(z.object({ id: z.string(), value: z.any() }))
-            .optional()
-            .describe('New array of custom fields to set for the task.'),
-          parentTask: z
-            .string()
-            .optional()
-            .describe('New ID of the parent task.'),
+            .describe(
+              'Optional array of custom field values to set on the task.'
+            ),
         })
       )
-      .describe('Array of task objects to update.'),
+      .describe('Array of tasks to update'),
+    options: z
+      .union([
+        z
+          .object({
+            batchSize: z
+              .number()
+              .optional()
+              .describe('Tasks per batch (default: 10)'),
+            concurrency: z
+              .number()
+              .optional()
+              .describe('Parallel operations (default: 3)'),
+            continueOnError: z
+              .boolean()
+              .optional()
+              .describe('Continue if some tasks fail'),
+            retryCount: z
+              .number()
+              .optional()
+              .describe('Retry attempts for failures'),
+          })
+          .optional(),
+        z.string().optional(),
+      ])
+      .optional()
+      .describe('Processing options (or JSON string representing options)'),
   },
   async (params) => {
     return (await handleUpdateBulkTasks(params)) as Tool;
@@ -637,12 +773,70 @@ server.tool(
   moveBulkTasksTool.name,
   moveBulkTasksTool.description,
   {
-    taskIds: z.array(z.string()).describe('Array of task IDs to move.'),
-    newListId: z.string().describe('ID of the list to move the tasks to.'),
-    newStatus: z
+    tasks: z
+      .array(
+        z.object({
+          taskId: z
+            .string()
+            .optional()
+            .describe(
+              "Task ID (preferred). Works with both regular task IDs (9 characters) and custom IDs with uppercase prefixes (like 'DEV-1234')."
+            ),
+          taskName: z
+            .string()
+            .optional()
+            .describe('Task name. Requires listName when used.'),
+          listName: z
+            .string()
+            .optional()
+            .describe('REQUIRED with taskName: List containing the task.'),
+          customTaskId: z
+            .string()
+            .optional()
+            .describe(
+              "Custom task ID (e.g., 'DEV-1234'). Only use if you want to explicitly force custom ID lookup. In most cases, use taskId which auto-detects ID format."
+            ),
+        })
+      )
+      .describe('Array of tasks to move'),
+    targetListId: z
       .string()
       .optional()
-      .describe('New status for the tasks in the new list.'),
+      .describe(
+        'ID of destination list (preferred). Use instead of targetListName if available.'
+      ),
+    targetListName: z
+      .string()
+      .optional()
+      .describe(
+        "Name of destination list. Only use if you don't have targetListId."
+      ),
+    options: z
+      .union([
+        z
+          .object({
+            batchSize: z
+              .number()
+              .optional()
+              .describe('Tasks per batch (default: 10)'),
+            concurrency: z
+              .number()
+              .optional()
+              .describe('Parallel operations (default: 3)'),
+            continueOnError: z
+              .boolean()
+              .optional()
+              .describe('Continue if some tasks fail'),
+            retryCount: z
+              .number()
+              .optional()
+              .describe('Retry attempts for failures'),
+          })
+          .optional(),
+        z.string().optional(),
+      ])
+      .optional()
+      .describe('Processing options (or JSON string representing options)'),
   },
   async (params) => {
     return (await handleMoveBulkTasks(params)) as Tool;
@@ -653,7 +847,58 @@ server.tool(
   deleteBulkTasksTool.name,
   deleteBulkTasksTool.description,
   {
-    taskIds: z.array(z.string()).describe('Array of task IDs to delete.'),
+    tasks: z
+      .array(
+        z.object({
+          taskId: z
+            .string()
+            .optional()
+            .describe(
+              "Task ID (preferred). Works with both regular task IDs (9 characters) and custom IDs with uppercase prefixes (like 'DEV-1234')."
+            ),
+          taskName: z
+            .string()
+            .optional()
+            .describe('Task name. Requires listName when used.'),
+          listName: z
+            .string()
+            .optional()
+            .describe('REQUIRED with taskName: List containing the task.'),
+          customTaskId: z
+            .string()
+            .optional()
+            .describe(
+              "Custom task ID (e.g., 'DEV-1234'). Only use if you want to explicitly force custom ID lookup. In most cases, use taskId which auto-detects ID format."
+            ),
+        })
+      )
+      .describe('Array of tasks to delete'),
+    options: z
+      .union([
+        z
+          .object({
+            batchSize: z
+              .number()
+              .optional()
+              .describe('Tasks per batch (default: 10)'),
+            concurrency: z
+              .number()
+              .optional()
+              .describe('Parallel operations (default: 3)'),
+            continueOnError: z
+              .boolean()
+              .optional()
+              .describe('Continue if some tasks fail'),
+            retryCount: z
+              .number()
+              .optional()
+              .describe('Retry attempts for failures'),
+          })
+          .optional(),
+        z.string().optional(),
+      ])
+      .optional()
+      .describe('Processing options (or JSON string representing options)'),
   },
   async (params) => {
     return (await handleDeleteBulkTasks(params)) as Tool;
@@ -664,71 +909,98 @@ server.tool(
   getWorkspaceTasksTool.name,
   getWorkspaceTasksTool.description,
   {
-    workspaceId: z
-      .string()
-      .optional()
-      .describe(
-        'ID of the workspace to get tasks from. Defaults to the current workspace.'
-      ),
-    listIds: z
-      .array(z.string())
-      .optional()
-      .describe('Array of list IDs to filter tasks by.'),
-    statuses: z
-      .array(z.string())
-      .optional()
-      .describe('Array of statuses to filter tasks by.'),
-    assignees: z
-      .array(z.string())
-      .optional()
-      .describe('Array of user IDs to filter tasks by.'),
     tags: z
       .array(z.string())
       .optional()
-      .describe('Array of tag names to filter tasks by.'),
-    dueDateGreaterThan: z
-      .string()
+      .describe(
+        'Filter tasks by tag names. Only tasks with ALL specified tags will be returned.'
+      ),
+    list_ids: z
+      .array(z.string())
       .optional()
-      .describe('Filter tasks with due date greater than (YYYY-MM-DD).'),
-    dueDateLessThan: z
-      .string()
+      .describe(
+        'Filter tasks by list IDs. Narrows the search to specific lists.'
+      ),
+    folder_ids: z
+      .array(z.string())
       .optional()
-      .describe('Filter tasks with due date less than (YYYY-MM-DD).'),
-    createdDateGreaterThan: z
-      .string()
+      .describe(
+        'Filter tasks by folder IDs. Narrows the search to specific folders.'
+      ),
+    space_ids: z
+      .array(z.string())
       .optional()
-      .describe('Filter tasks with created date greater than (YYYY-MM-DD).'),
-    createdDateLessThan: z
-      .string()
+      .describe(
+        'Filter tasks by space IDs. Narrows the search to specific spaces.'
+      ),
+    statuses: z
+      .array(z.string())
       .optional()
-      .describe('Filter tasks with created date less than (YYYY-MM-DD).'),
-    updatedDateGreaterThan: z
-      .string()
+      .describe(
+        "Filter tasks by status names (e.g., ['To Do', 'In Progress'])."
+      ),
+    assignees: z
+      .array(z.string())
       .optional()
-      .describe('Filter tasks with updated date greater than (YYYY-MM-DD).'),
-    updatedDateLessThan: z
-      .string()
+      .describe('Filter tasks by assignee IDs.'),
+    date_created_gt: z
+      .number()
       .optional()
-      .describe('Filter tasks with updated date less than (YYYY-MM-DD).'),
-    includeSubtasks: z
-      .boolean()
+      .describe('Filter for tasks created after this timestamp.'),
+    date_created_lt: z
+      .number()
       .optional()
-      .describe('Include subtasks in the results.'),
-    includeClosed: z
+      .describe('Filter for tasks created before this timestamp.'),
+    date_updated_gt: z
+      .number()
+      .optional()
+      .describe('Filter for tasks updated after this timestamp.'),
+    date_updated_lt: z
+      .number()
+      .optional()
+      .describe('Filter for tasks updated before this timestamp.'),
+    due_date_gt: z
+      .number()
+      .optional()
+      .describe('Filter for tasks with due date greater than this timestamp.'),
+    due_date_lt: z
+      .number()
+      .optional()
+      .describe('Filter for tasks with due date less than this timestamp.'),
+    include_closed: z
       .boolean()
       .optional()
       .describe('Include closed tasks in the results.'),
-    sortBy: z
+    include_archived_lists: z
+      .boolean()
+      .optional()
+      .describe('Include tasks from archived lists.'),
+    include_closed_lists: z
+      .boolean()
+      .optional()
+      .describe('Include tasks from closed lists.'),
+    archived: z
+      .boolean()
+      .optional()
+      .describe('Include archived tasks in the results.'),
+    order_by: z
+      .string()
+      .optional()
+      .describe('Sort field for ordering results.'),
+    reverse: z
+      .boolean()
+      .optional()
+      .describe('Reverse sort order (descending).'),
+    page: z
+      .number()
+      .optional()
+      .describe('Page number for pagination (0-based).'),
+    detail_level: z
       .string()
       .optional()
       .describe(
-        "Field to sort tasks by (e.g., 'dueDate', 'createdDate', 'priority')."
+        'Level of detail to return. Use summary for lightweight responses or detailed for full task data. If not specified, defaults to "detailed".'
       ),
-    sortOrder: z
-      .enum(['asc', 'desc'])
-      .optional()
-      .describe("Sort order ('asc' or 'desc')."),
-    page: z.number().optional().describe('Page number for pagination.'),
   },
   async (params) => {
     return (await handleGetWorkspaceTasks(params)) as Tool;
